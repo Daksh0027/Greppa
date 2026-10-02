@@ -1,0 +1,52 @@
+[
+  {
+    "id": 1,
+    "question": "How does user credential authentication and password verification work?",
+    "expected_files": ["auth_service.py"]
+  },
+  {
+    "id": 2,
+    "question": "Where are session bearer tokens issued and generated?",
+    "expected_files": ["auth_service.py"]
+  },
+  {
+    "id": 3,
+    "question": "How are bank credit card charges and transactions processed?",
+    "expected_files": ["payment_gateway.py"]
+  },
+  {
+    "id": 4,
+    "question": "Where is payment fraud checking performed before charging?",
+    "expected_files": ["payment_gateway.py"]
+  },
+  {
+    "id": 5,
+    "question": "How does the HTTP login endpoint handle user sessions?",
+    "expected_files": ["user_controller.py"]
+  },
+  {
+    "id": 6,
+    "question": "Where is user subscription purchasing and billing orchestrated?",
+    "expected_files": ["user_controller.py"]
+  },
+  {
+    "id": 7,
+    "question": "What service verifies password hash length?",
+    "expected_files": ["auth_service.py"]
+  },
+  {
+    "id": 8,
+    "question": "Where is PaymentGateway instantiated and configured with API keys?",
+    "expected_files": ["user_controller.py", "payment_gateway.py"]
+  },
+  {
+    "id": 9,
+    "question": "What method generates bearer token strings with user IDs?",
+    "expected_files": ["auth_service.py"]
+  },
+  {
+    "id": 10,
+    "question": "How is customer fraud prevented during charge processing?",
+    "expected_files": ["payment_gateway.py"]
+  }
+]

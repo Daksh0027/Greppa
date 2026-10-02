@@ -1,15 +1,25 @@
 import os
 import logging
 import hashlib
+import time
 from typing import List, Dict, Optional, Any
 from app.core.config import settings
 
 logger = logging.getLogger("greppa.llm")
 
 class LLMProvider:
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, repo_id: Optional[int] = None, db_session: Optional[Any] = None):
         self.api_key = api_key or settings.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
+        self.repo_id = repo_id
+        self.db_session = db_session
         self._client = None
+        self._call_logger = None
+        
+        # Initialize observability logger if repo_id and db provided
+        if repo_id and db_session:
+            from app.core.observability import LLMCallLogger
+            self._call_logger = LLMCallLogger(db=db_session, repo_id=repo_id)
+        
         if self.api_key:
             try:
                 from google import genai
@@ -27,17 +37,48 @@ class LLMProvider:
         """
         model_name = model or settings.CHEAP_MODEL_NAME
         if self._client:
+            start_time = time.time()
             try:
                 contents = prompt
                 if system_prompt:
                     contents = f"{system_prompt}\n\n{prompt}"
+                
                 response = self._client.models.generate_content(
                     model=model_name,
                     contents=contents
                 )
+                
+                # Track call metrics
                 if response and response.text:
+                    latency_ms = (time.time() - start_time) * 1000
+                    
+                    # Estimate tokens (rough approximation: 1 token ≈ 4 chars)
+                    prompt_tokens = len(contents) // 4
+                    completion_tokens = len(response.text) // 4
+                    
+                    if self._call_logger:
+                        self._call_logger.log_call(
+                            model_name=model_name,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            latency_ms=latency_ms,
+                            operation="generate_summary",
+                            success=True
+                        )
+                    
                     return response.text.strip()
             except Exception as e:
+                latency_ms = (time.time() - start_time) * 1000
+                if self._call_logger:
+                    self._call_logger.log_call(
+                        model_name=model_name,
+                        prompt_tokens=len(prompt) // 4,
+                        completion_tokens=0,
+                        latency_ms=latency_ms,
+                        operation="generate_summary",
+                        success=False,
+                        error=str(e)
+                    )
                 logger.warning(f"Gemini generate_summary error: {e}. Falling back to heuristic summary.")
 
         # Heuristic fallback summary if Gemini API key not provided or quota exceeded
@@ -54,17 +95,47 @@ class LLMProvider:
         """
         model_name = model or settings.STRONG_MODEL_NAME
         if self._client:
+            start_time = time.time()
             try:
                 contents = prompt
                 if system_instruction:
                     contents = f"{system_instruction}\n\n{prompt}"
+                
                 response = self._client.models.generate_content(
                     model=model_name,
                     contents=contents
                 )
+                
                 if response and response.text:
+                    latency_ms = (time.time() - start_time) * 1000
+                    
+                    # Estimate tokens
+                    prompt_tokens = len(contents) // 4
+                    completion_tokens = len(response.text) // 4
+                    
+                    if self._call_logger:
+                        self._call_logger.log_call(
+                            model_name=model_name,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            latency_ms=latency_ms,
+                            operation="generate_answer",
+                            success=True
+                        )
+                    
                     return response.text.strip()
             except Exception as e:
+                latency_ms = (time.time() - start_time) * 1000
+                if self._call_logger:
+                    self._call_logger.log_call(
+                        model_name=model_name,
+                        prompt_tokens=len(prompt) // 4,
+                        completion_tokens=0,
+                        latency_ms=latency_ms,
+                        operation="generate_answer",
+                        success=False,
+                        error=str(e)
+                    )
                 logger.warning(f"Gemini generate_answer error: {e}. Falling back to heuristic synthesis.")
 
         return (
@@ -83,6 +154,7 @@ class LLMProvider:
             return []
 
         if self._client:
+            start_time = time.time()
             try:
                 embeddings = []
                 for text in texts:
@@ -96,8 +168,32 @@ class LLMProvider:
                         embeddings.append(list(res.embeddings[0].values))
                     else:
                         embeddings.append(self._pseudo_embedding(text, settings.EMBEDDING_DIM))
+                
+                # Log embedding call
+                latency_ms = (time.time() - start_time) * 1000
+                total_tokens = sum(len(t) // 4 for t in texts)
+                
+                if self._call_logger:
+                    self._call_logger.log_embedding_call(
+                        model_name=settings.EMBEDDING_MODEL_NAME,
+                        num_embeddings=len(texts),
+                        total_tokens=total_tokens,
+                        latency_ms=latency_ms,
+                        success=True
+                    )
+                
                 return embeddings
             except Exception as e:
+                latency_ms = (time.time() - start_time) * 1000
+                if self._call_logger:
+                    self._call_logger.log_embedding_call(
+                        model_name=settings.EMBEDDING_MODEL_NAME,
+                        num_embeddings=len(texts),
+                        total_tokens=sum(len(t) // 4 for t in texts),
+                        latency_ms=latency_ms,
+                        success=False,
+                        error=str(e)
+                    )
                 logger.warning(f"Gemini embed_content error: {e}. Falling back to deterministic embeddings.")
 
         return [self._pseudo_embedding(t, settings.EMBEDDING_DIM) for t in texts]
@@ -125,5 +221,5 @@ class LLMProvider:
         first_few = [l for l in lines if not l.startswith("```") and len(l) > 5][:4]
         return f"Component summary: {' | '.join(first_few)}" if first_few else "Module component definition."
 
-def get_llm_provider(api_key: Optional[str] = None) -> LLMProvider:
-    return LLMProvider(api_key=api_key)
+def get_llm_provider(api_key: Optional[str] = None, repo_id: Optional[int] = None, db_session: Optional[Any] = None) -> LLMProvider:
+    return LLMProvider(api_key=api_key, repo_id=repo_id, db_session=db_session)

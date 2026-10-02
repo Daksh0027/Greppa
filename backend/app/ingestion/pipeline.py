@@ -1,5 +1,7 @@
 import os
+import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple, Set, Any
 from sqlalchemy.orm import Session
 from app.core.models import (
@@ -36,11 +38,52 @@ class IngestionPipeline:
         repo.status_detail = "Scanning file tree and computing content hashes..."
         self.db.commit()
 
+        from app.core.models import JobRecord, RepoVersionRecord
+        from app.ingestion.analyzer import analyze_tech_stack_and_entrypoints
+
+        # Register or update background job
+        job = self.db.query(JobRecord).filter(
+            JobRecord.repo_id == self.repo_id,
+            JobRecord.status.in_(["queued", "running"])
+        ).first()
+        if not job:
+            job = JobRecord(
+                repo_id=self.repo_id,
+                job_type="incremental_sync" if incremental else "full_ingest",
+                status="running",
+                progress_percent=15.0,
+                current_step="Scanning file tree"
+            )
+            self.db.add(job)
+            self.db.commit()
+
         # Step 1: Scan files with gitignore and size filters
         scanned_files = scan_repository(repo_dir)
         scanned_by_path: Dict[str, ScannedFile] = {f.rel_path: f for f in scanned_files}
 
+        # Analyze tech stack & entrypoints
+        analysis = analyze_tech_stack_and_entrypoints(repo_dir, list(scanned_by_path.keys()))
+        repo.tech_stack = analysis
+
+        # Record repo version / commit SHA if git
+        commit_sha = "local_" + hashlib.sha256(str(len(scanned_files)).encode()).hexdigest()[:12]
+        if os.path.exists(os.path.join(repo_dir, ".git")):
+            try:
+                import subprocess
+                res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_dir, capture_output=True, text=True)
+                if res.returncode == 0:
+                    commit_sha = res.stdout.strip()
+            except Exception:
+                pass
+
+        version_rec = RepoVersionRecord(repo_id=self.repo_id, commit_sha=commit_sha)
+        self.db.add(version_rec)
+        self.db.flush()
+
         # Step 2: Incremental diff computation
+        job.progress_percent = 30.0
+        job.current_step = "Computing file content hash diff"
+        self.db.commit()
         existing_files = self.db.query(FileRecord).filter(FileRecord.repo_id == self.repo_id).all()
         existing_by_path: Dict[str, FileRecord] = {f.path: f for f in existing_files}
 
@@ -256,6 +299,14 @@ class IngestionPipeline:
         }
         repo.status = "ready"
         repo.status_detail = "Index is active and ready for queries"
+
+        # Finalize job record
+        if job:
+            job.status = "completed"
+            job.progress_percent = 100.0
+            job.current_step = "Ingestion complete"
+            job.finished_at = datetime.now(timezone.utc)
+
         self.db.commit()
 
         return repo.stats

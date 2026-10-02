@@ -2,12 +2,13 @@ import os
 import shutil
 import subprocess
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Header
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Header, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.models import Repository, FileRecord, SymbolRecord
 from app.core.config import settings
+from app.core.security import limiter, RateLimitConfig, validate_repo_url, sanitize_input
 from app.ingestion.pipeline import IngestionPipeline
 
 router = APIRouter(prefix="/repos", tags=["repositories"])
@@ -48,16 +49,27 @@ def run_ingestion_background(repo_id: int, target_dir: str, api_key: Optional[st
         db.close()
 
 @router.get("", response_model=List[RepoResponse])
-def list_repositories(db: Session = Depends(get_db)):
+@limiter.limit(RateLimitConfig.DEFAULT)
+def list_repositories(request: Request, db: Session = Depends(get_db)):
     return db.query(Repository).order_by(Repository.id.desc()).all()
 
 @router.post("", response_model=RepoResponse)
+@limiter.limit(RateLimitConfig.INGESTION)
 def create_repository(
+    request: Request,
     req: RepoCreateRequest,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     x_gemini_api_key: Optional[str] = Header(None)
 ):
+    # Validate and sanitize inputs
+    req.name = sanitize_input(req.name, max_length=255)
+    req.url_or_path = sanitize_input(req.url_or_path, max_length=1024)
+    
+    # Validate repo URL for security (prevent SSRF)
+    if not validate_repo_url(req.url_or_path):
+        raise HTTPException(status_code=400, detail="Invalid or disallowed repository URL")
+    
     key = req.api_key or x_gemini_api_key
     # Check if local directory exists, or clone git repo
     target_dir = req.url_or_path
@@ -185,11 +197,27 @@ class UserController:
     return repo
 
 @router.get("/{repo_id}", response_model=RepoResponse)
-def get_repository(repo_id: int, db: Session = Depends(get_db)):
+@limiter.limit(RateLimitConfig.DEFAULT)
+def get_repository(request: Request, repo_id: int, db: Session = Depends(get_db)):
     repo = db.query(Repository).filter(Repository.id == repo_id).first()
     if not repo:
         raise HTTPException(status_code=404, detail="Repository not found")
     return repo
+
+
+@router.get("/{repo_id}/cost", response_model=Dict[str, Any])
+@limiter.limit(RateLimitConfig.DEFAULT)
+def get_repository_cost(request: Request, repo_id: int, db: Session = Depends(get_db)):
+    """Get cost tracking information for a repository"""
+    repo = db.query(Repository).filter(Repository.id == repo_id).first()
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found")
+    
+    from app.core.observability import LLMCallLogger
+    logger_instance = LLMCallLogger(db=db, repo_id=repo_id)
+    cost_info = logger_instance.get_repo_total_cost(repo_id)
+    
+    return cost_info
 
 @router.post("/{repo_id}/sync", response_model=RepoResponse)
 def sync_repository(

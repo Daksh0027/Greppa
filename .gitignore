@@ -17,7 +17,10 @@ dist/
 .DS_Store
 
 # Environment & Storage
+# Keep .env.example in git as a template, but ignore actual .env files
 .env
+backend/.env
+frontend/.env.local
 storage/
 *.log
 .pytest_cache/
